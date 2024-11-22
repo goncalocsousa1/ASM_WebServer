@@ -1,12 +1,15 @@
 # Assembly Web Server
 
-This project is a simple implementation of a web server using x86-64 Assembly, built based on a detailed tutorial. The server accepts client connections and responds with a simple HTML page.
+This project is a simple implementation of a web server using x86-64 Assembly, built based on a detailed tutorial. The server accepts client connections and responds with a simple HTML page. The new implementation includes multi-threading support and synchronization using `futex`.
 
 ## Features
 
 - Creation of a TCP/IP socket
 - Binding the socket to a specific port (3000)
 - Listening for incoming client connections
+- Utilization of threads for concurrent connection processing
+- Synchronization between threads using `futex`
+- Enqueuing connections for processing
 - Sending a simple HTTP response with HTML content
 - Closing the connection after sending the response
 
@@ -14,8 +17,11 @@ This project is a simple implementation of a web server using x86-64 Assembly, b
 
 1. **Socket and Bind:** The server creates a socket and binds it to port 3000 on the local interface.
 2. **Listen and Accept:** The server listens for client connections and accepts a connection when a client attempts to connect.
-3. **HTTP Response:** The server sends a simple HTTP response with a basic Hello world HTML page.
-4. **Closing the Connection:** After sending the response, the server closes the client connection.
+3. **Thread Pool:** A pool of threads is initialized to handle incoming connections concurrently.
+4. **Connection Queue:** Once a connection is accepted, it is placed in a queue for processing by one of the available threads.
+5. **Synchronization with Futex:** Threads are synchronized using the `futex` system call, allowing efficient coordination when waiting for work or a signal.
+6. **HTTP Response:** The server sends a simple HTTP response with a basic "Hello, World!" HTML page.
+7. **Closing the Connection:** After sending the response, the server closes the client connection.
 
 ## Requirements
 
