@@ -31,7 +31,7 @@ This project is a simple implementation of a web server using x86-64 Assembly, b
     Basic knowledge of Assembly and TCP/IP networking
 
 ## Running the Project
-1. **Clone the repository: **
+1. **Clone the repository:**
    ```
    git clone https://github.com/goncalocsousa1/ASM_WebServer.git
    ```
