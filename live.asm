@@ -3,9 +3,15 @@ global _start
 %define SYS_socket 41
 %define SYS_bind 49
 %define SYS_listen 50
-%define SYS_accept 288
+%define SYS_accept4 288
 %define SYS_write 1
 %define SYS_close 3
+
+%define SYS_nanosleep 35
+%define SYS_clone 56
+%define SYS_brk 12
+%define SYS_exit 60
+%define SYS_futex 202
 
 %define AF_INET 2
 %define SOCK_STREAM 1
@@ -14,23 +20,34 @@ global _start
 %define CR 0xD
 %define LF 0xA
 
-; Data types in asm
-; byte => 1 byte
-; word => 2 bytes
-; doubleword => 4 bytes
-; quadword => 8 bytes
-  
-  
-section .bss
-sockfd: resq 1    ; Use `resq` para armazenar o descritor do socket (8 bytes)
+%define CHILD_STACK_SIZE 4096
+%define CLONE_VM 0x00000100
+%define CLONE_FS 0x00000200
+%define CLONE_FILES 0x00000400
+%define CLONE_PARENT 0x00008000
+%define CLONE_THREAD 0x00010000
+%define CLONE_IO 0x80000000
+%define CLONE_SIGHAND 0x00000800
+
+%define FUTEX_WAKE 1
+%define FUTEX_WAIT 0
+%define FUTEX_PRIVATE_FLAG 128
+%define PROT_READ      1        
+%define PROT_WRITE     2        
+%define PROT_EXEC      4       
+%define PROT_NONE      0        
+%define MAP_PRIVATE    2        
+%define MAP_ANONYMOUS  32       
+%define MAP_FIXED      16       
+%define SYS_mmap       9       
+%define MAP_GROWSDOWN  16384
 
 section .data
-sockaddr: 
-    family: dw AF_INET   ; 2 bytes
-    port: dw 0xB80B      ; 2 bytes (representa a porta 3000)
-    ip_address: dd 0     ; 4 bytes
-    sin_zero: dq 0       ; 8 bytes
-
+sockaddr:
+    sa_family: dw AF_INET   ; 2 bytes
+    port: dw 0xB80B         ; 2 bytes
+    ip_addr: dd 0           ; 4 bytes
+    sin_zero: dq 0          ; 8 bytes
 response: 
     headline: db "HTTP/1.1 200 OK", CR, LF
     content_type: db "Content-Type: text/html", CR, LF
@@ -38,9 +55,26 @@ response:
     crlf: db CR, LF
     body: db "<h1>Hello, World!</h1>"
 responseLen: equ $ - response
+timespec:
+    tv_sec: dq 1
+    tv_nsec: dq 0
+queuePtr: db 0
+
+section .bss
+sockfd: resb 8
+queue: resb 8
+condvar: resb 8
 
 section .text
 _start:
+.initialize_pool:
+    mov r8, 0
+.pool:
+    call thread        
+    inc r8
+    cmp r8, 5
+    je .socket
+    jmp .pool
 .socket:
     ; int socket(int domain, int type, int protocol)
     mov rdi, AF_INET
@@ -48,50 +82,142 @@ _start:
     mov rdx, SOCK_PROTOCOL
     mov rax, SYS_socket
     syscall
-    mov [sockfd], rax  ; Armazena o descritor de socket
-
 .bind:
+    mov [sockfd], rax
     ; int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
-    mov rdi, [sockfd]     ; Descritor de arquivo do socket
-    lea rsi, [sockaddr]   ; Endereço do `sockaddr`
-    mov rdx, 16           ; Tamanho da estrutura `sockaddr`
+    mov rdi, [sockfd]
+    mov rsi, sockaddr
+    mov rdx, 16
     mov rax, SYS_bind
     syscall
-
 .listen:
     ; int listen(int sockfd, int backlog)
     mov rdi, [sockfd]
     mov rsi, BACKLOG
     mov rax, SYS_listen
     syscall
-
 .accept:
     ; int accept(int sockfd, struct *addr, int addrlen, int flags)
     mov rdi, [sockfd]
-    mov rsi, 0              ; não precisa estabelecer um addr
-    mov rdx, 0              ; não precisa do tamanho uma vez que não há addr
+    mov rsi, 0
+    mov rdx, 0
     mov r10, 0
-    mov rax, SYS_accept
+    mov rax, SYS_accept4
     syscall
-    mov r8, rax 	    ; client socket    
-    call .write             ; escreve no socket
-    call .close             ; fecha o socket
-    jmp .accept             ; mantém o servidor em loop
 
-.write:
-    ; int write(int fd, buffer *bf, int bfLen)
-    mov rdi, r8
+    mov r8, rax
+    call enqueue
+
+    jmp .accept
+enqueue:
+    xor rdx, rdx
+    mov dl, [queuePtr]  
+    mov [queue + rdx], r8   
+    inc byte [queuePtr]
+
+    call emit_signal
+    ret
+emit_signal:
+   ; Endereço de memória para a variável condicional (8 bytes)
+   mov rdi, condvar
+
+   ; Flags do Futex (WAKE), que irá trazer a thread
+   ; de volta ao contexto
+   mov rsi, FUTEX_WAKE | FUTEX_PRIVATE_FLAG 
+
+   ; Argumentos adicionais, que neste caso vamos deixar a ZERO
+   xor rdx, rdx
+   xor r10, r10
+   xor r8, r8
+
+   ; Chamada da syscall
+   mov rax, SYS_futex
+   syscall
+   ret
+thread:
+    mov rdi, 0x0
+    mov rsi, CHILD_STACK_SIZE
+    mov rdx, PROT_WRITE | PROT_READ
+    mov r10, MAP_ANONYMOUS | MAP_PRIVATE | MAP_GROWSDOWN
+    mov rax, SYS_mmap
+    syscall
+
+    mov rdi, CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_PARENT|CLONE_THREAD|CLONE_IO
+    lea rsi, [rax + CHILD_STACK_SIZE - 8]
+    mov qword [rsi], handle
+    mov rax, SYS_clone
+    syscall
+    ret
+
+handle: 
+    ; Caso a fila esteja vazia, fazemos jump para "wait"
+    cmp byte [queuePtr], 0         
+    je .wait           
+
+    ; Faz pop do socket da fila e segue o fluxo normal
+    call dequeue      
+    mov r10, rax
+
+    lea rdi, [timespec]
+    mov rax, SYS_nanosleep
+    syscall
+
+    ; int write(fd)
+    mov rdi, r10
     mov rsi, response
     mov rdx, responseLen
     mov rax, SYS_write
     syscall
-    ret
 
-.close:
-    ; int close(int fd)
-    mov rdi, r8
+    ; int close(fd)
+    mov rdi, r10
     mov rax, SYS_close
     syscall
+
+    ; Volta para o início
+    jmp handle       
+.wait:
+    ; Chamada para wait_condvar, que vai suspender a thread atual com FUTEX
+    call wait_condvar 
+    jmp handle
+wait_condvar:
+   ; Endereço de memória para a variável condicional (8 bytes)
+   mov rdi, condvar   
+
+   ; Flags do Futex (WAIT), que irá suspender a thread
+   mov rsi, FUTEX_WAIT | FUTEX_PRIVATE_FLAG 
+   xor rdx, rdx
+   xor r10, r10              
+   xor r8, r8               
+   mov rax, SYS_futex
+   syscall
+   test rax, rax
+   jz .done_condvar
+.done_condvar:
+   ret
+dequeue:
+    xor rax, rax
+    xor rsi, rsi
+
+    mov al, [queue]
+    mov rcx, 0
+.loop_dequeue:
+    cmp byte [queuePtr], 0
+    je .return_dequeue
+
+    cmp cl, [queuePtr]
+    je .done_dequeue
+
+    ; shift
+    xor r10, r10
+    mov r10b, [queue + rcx + 1]
+    mov byte [queue + rcx], r10b
+
+    inc rcx
+    jmp .loop_dequeue
+.done_dequeue:
+    dec byte [queuePtr]
+.return_dequeue:
     ret
 
 
